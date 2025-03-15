@@ -1,5 +1,6 @@
-import { SuiClient, getFullnodeUrl } from '@mysten/sui/client';
+import { SuiClient, getFullnodeUrl, PaginatedTransactionResponse } from '@mysten/sui/client';
 import { getCurrentPrice } from './navi-client';
+import { MIST_PER_SUI } from '@mysten/sui/utils';
 
 // Utility function to format SUI token with correct decimals (9 decimals)
 export const formatSuiBalance = (balance: number | string | undefined | any): string => {
@@ -51,10 +52,14 @@ export const getAccountBalance = async (address: string, network: 'mainnet' | 't
     console.log('Balance type:', typeof balance);
     console.log('Balance properties:', Object.keys(balance));
     
-    return balance;
+    // Convert from MIST to SUI
+    const balanceInSui = Number(balance.totalBalance) / Number(MIST_PER_SUI);
+    console.log(`Balance for ${address}: ${balanceInSui} SUI`);
+    
+    return balanceInSui;
   } catch (error) {
     console.error('Error fetching balance:', error);
-    return { totalBalance: '0' };
+    throw error; // Let the caller handle the error - no more mock data
   }
 };
 
@@ -739,124 +744,116 @@ export interface ProcessedTransaction {
   rawTransaction: any; // Original transaction data
 }
 
-// New function to get all transactions for an address with pagination
+// Get all transactions for an address with pagination support
 export const getAllTransactionsForAddress = async (
   address: string,
   network: 'mainnet' | 'testnet' | 'devnet' = 'mainnet',
-  maxTransactions = 500
+  maxTransactions = 100
 ): Promise<any[]> => {
-  if (!address) return [];
+  // Ensure we have a valid address
+  if (!address || address === 'null' || address === 'undefined') {
+    console.error('Invalid address provided to getAllTransactionsForAddress:', address);
+    return [];
+  }
   
-  console.log(`Getting all transactions for address: ${address} (network: ${network})`);
+  // Convert address to string if it's not already
+  const addressStr = String(address).trim();
+  
+  // Validate format of Sui address (should start with 0x and be the right length)
+  if (!addressStr.startsWith('0x') || addressStr.length < 30) {
+    console.error('Invalid address format:', addressStr);
+    return [];
+  }
+  
+  console.log(`Getting transactions for address: ${addressStr} (network: ${network}, max: ${maxTransactions})`);
   const client = getSuiClient(network);
   
-  // Arrays to store transactions and cursors
   const transactions: any[] = [];
   let fromCursor: string | undefined = undefined;
   let toCursor: string | undefined = undefined;
   let hasMoreFrom = true;
   let hasMoreTo = true;
-  
-  // Page size for each request (max allowed is 50)
-  const pageSize = 50;
   let totalFetched = 0;
   
   try {
-    // Continue fetching until we hit maxTransactions or run out of transactions
+    // Keep fetching until we hit maxTransactions or run out of transactions
     while ((hasMoreFrom || hasMoreTo) && totalFetched < maxTransactions) {
       const fetchPromises = [];
       
-      // Only fetch from if we have more transactions and haven't reached the limit
+      // Fetch outgoing transactions if there are more
       if (hasMoreFrom && totalFetched < maxTransactions) {
-        const fromQueryOptions: any = {
-          filter: {
-            FromAddress: address,
-          },
+        const queryOptions: any = {
+          filter: { FromAddress: addressStr },
           options: {
             showInput: true,
+            showEffects: true,
             showEvents: true,
             showObjectChanges: true,
             showBalanceChanges: true,
-            showEffects: true,
           },
-          limit: pageSize,
+          limit: 50, // API limit is 50
         };
         
-        // Only add cursor if it exists
-        if (fromCursor) {
-          fromQueryOptions.cursor = fromCursor;
-        }
+        if (fromCursor) queryOptions.cursor = fromCursor;
         
         fetchPromises.push(
-          client.queryTransactionBlocks(fromQueryOptions)
+          client.queryTransactionBlocks(queryOptions)
             .then(result => {
               console.log(`Fetched ${result.data.length} outgoing transactions`);
               if (result.data.length > 0) {
                 transactions.push(...result.data);
                 totalFetched += result.data.length;
-                fromCursor = result.nextCursor || undefined;
+                fromCursor = result.nextCursor ?? undefined;
                 hasMoreFrom = !!result.hasNextPage;
               } else {
                 hasMoreFrom = false;
               }
-              return result;
             })
             .catch(error => {
               console.error('Error fetching outgoing transactions:', error);
               hasMoreFrom = false;
-              return null;
             })
         );
       }
       
-      // Only fetch to if we have more transactions and haven't reached the limit
+      // Fetch incoming transactions if there are more
       if (hasMoreTo && totalFetched < maxTransactions) {
-        const toQueryOptions: any = {
-          filter: {
-            ToAddress: address,
-          },
+        const queryOptions: any = {
+          filter: { ToAddress: addressStr },
           options: {
             showInput: true,
+            showEffects: true,
             showEvents: true,
             showObjectChanges: true,
             showBalanceChanges: true,
-            showEffects: true,
           },
-          limit: pageSize,
+          limit: 50, // API limit is 50
         };
         
-        // Only add cursor if it exists
-        if (toCursor) {
-          toQueryOptions.cursor = toCursor;
-        }
+        if (toCursor) queryOptions.cursor = toCursor;
         
         fetchPromises.push(
-          client.queryTransactionBlocks(toQueryOptions)
+          client.queryTransactionBlocks(queryOptions)
             .then(result => {
               console.log(`Fetched ${result.data.length} incoming transactions`);
               if (result.data.length > 0) {
                 transactions.push(...result.data);
                 totalFetched += result.data.length;
-                toCursor = result.nextCursor || undefined;
+                toCursor = result.nextCursor ?? undefined;
                 hasMoreTo = !!result.hasNextPage;
               } else {
                 hasMoreTo = false;
               }
-              return result;
             })
             .catch(error => {
               console.error('Error fetching incoming transactions:', error);
               hasMoreTo = false;
-              return null;
             })
         );
       }
       
-      // Wait for both promises to resolve
       await Promise.all(fetchPromises);
-      console.log(`Fetched ${totalFetched} transactions so far (max: ${maxTransactions})`);
       
-      // Safety check to prevent infinite loops
       if (fetchPromises.length === 0) break;
     }
     
@@ -870,18 +867,30 @@ export const getAllTransactionsForAddress = async (
       return Number(b.timestampMs || 0) - Number(a.timestampMs || 0);
     });
     
-    console.log(`Retrieved ${uniqueTransactions.length} unique transactions out of ${totalFetched} total fetched`);
+    console.log(`Retrieved ${uniqueTransactions.length} unique transactions`);
     return uniqueTransactions;
     
   } catch (error) {
-    console.error('Error fetching all transactions:', error);
-    return [];
+    console.error('Error fetching transactions:', error);
+    throw error; // Let the caller handle the error - no more mock data
   }
 };
 
 // Process transactions into a standardized format
 export const processTransactions = (txs: any[], address: string): ProcessedTransaction[] => {
-  return txs.map(tx => {
+  // Ensure address is properly formatted
+  if (!address || address === 'null' || address === 'undefined') {
+    console.error('Invalid address provided to processTransactions:', address);
+    return [];
+  }
+  
+  // Convert address to string and normalize
+  const addressStr = String(address).trim();
+  
+  console.log(`Processing ${txs.length} transactions for address: ${addressStr}`);
+  const processedTxs: ProcessedTransaction[] = [];
+  
+  for (const tx of txs) {
     try {
       // Default transaction type is NONE
       let type = TransactionType.NONE;
@@ -890,42 +899,44 @@ export const processTransactions = (txs: any[], address: string): ProcessedTrans
       
       // Process balance changes to determine transaction type
       const balanceChanges = tx.balanceChanges || [];
-      let formattedBalanceChanges: { owner: string; coinType: string; amount: number }[] = [];
+      const formattedBalanceChanges: { owner: string; coinType: string; amount: number }[] = [];
       let totalAmountChange = 0;
       
-      // Process balance changes
-      balanceChanges.forEach((change: any) => {
+      // Process balance changes to determine transaction type
+      for (const change of balanceChanges) {
         try {
-          const owner = change.owner as any;
-          const amount = Number(change.amount || 0) / 1_000_000_000; // Convert MIST to SUI
+          const owner = change.owner;
+          if (!owner) continue;
           
-          // Only process if we can determine the owner
-          if (owner) {
-            const ownerAddress = typeof owner === 'string' 
-              ? owner 
-              : (owner.AddressOwner || 'Unknown');
+          const ownerAddress = typeof owner === 'string' 
+            ? owner 
+            : (owner.AddressOwner || 'Unknown');
+          
+          // Skip non-SUI tokens for now
+          if (!change.coinType.includes('::sui::SUI')) continue;
+          
+          const amount = Number(change.amount) / 1_000_000_000; // Convert MIST to SUI
+          
+          formattedBalanceChanges.push({
+            owner: ownerAddress,
+            coinType: change.coinType,
+            amount
+          });
+          
+          if (ownerAddress === addressStr) {
+            totalAmountChange += amount;
             
-            formattedBalanceChanges.push({
-              owner: ownerAddress,
-              coinType: change.coinType || 'Unknown',
-              amount
-            });
-            
-            if (ownerAddress === address) {
-              totalAmountChange += amount;
-              
-              if (amount > 0) {
-                isReceiver = true;
-              }
-              if (amount < 0) {
-                isSender = true;
-              }
+            if (amount > 0) {
+              isReceiver = true;
+            }
+            if (amount < 0) {
+              isSender = true;
             }
           }
         } catch (changeError) {
           console.error('Error processing balance change:', changeError);
         }
-      });
+      }
       
       // Determine transaction type based on balance changes
       if (isSender && isReceiver) {
@@ -938,42 +949,42 @@ export const processTransactions = (txs: any[], address: string): ProcessedTrans
         // If no balance changes or couldn't determine from balance changes
         // Try to determine from transaction data
         const sender = tx.transaction?.data?.sender;
-        if (sender === address) {
+        if (sender === addressStr) {
           type = TransactionType.SEND;
         }
       }
       
-      // Get sender (from) and recipient (to) addresses
+      // Get sender and recipient addresses
       let from = tx.transaction?.data?.sender || 'Unknown';
       let to = 'Unknown';
       
       // Try to determine recipient from balance changes
-      if (balanceChanges.length > 0) {
-        for (const change of balanceChanges) {
-          try {
-            const owner = change.owner as any;
-            const ownerAddress = typeof owner === 'string'
-              ? owner
-              : (owner?.AddressOwner || null);
-            
-            if (ownerAddress && ownerAddress !== from && Number(change.amount || 0) > 0) {
-              to = ownerAddress;
-              break;
-            }
-          } catch (error) {
-            // Skip this change
+      for (const change of balanceChanges) {
+        try {
+          const owner = change.owner;
+          if (!owner) continue;
+          
+          const ownerAddress = typeof owner === 'string'
+            ? owner
+            : (owner?.AddressOwner || null);
+          
+          if (ownerAddress && ownerAddress !== from && Number(change.amount) > 0) {
+            to = ownerAddress;
+            break;
           }
+        } catch (error) {
+          // Skip this change
         }
       }
       
       // Get gas fee
       const gasFee = tx.effects?.gasUsed 
-        ? (Number(tx.effects.gasUsed.computationCost || 0) / 1_000_000_000).toFixed(5)
+        ? (Number(tx.effects.gasUsed.computationCost) / 1_000_000_000).toFixed(5)
         : '0';
       
-      // Create standardized transaction object
-      return {
-        hash: tx.digest || 'unknown',
+      // Create processed transaction
+      processedTxs.push({
+        hash: tx.digest,
         timestamp: tx.timestampMs ? Number(tx.timestampMs) : null,
         status: tx.effects?.status?.status === 'success' 
           ? TransactionStatus.SUCCESS 
@@ -984,414 +995,278 @@ export const processTransactions = (txs: any[], address: string): ProcessedTrans
         type,
         balanceChanges: formattedBalanceChanges,
         rawTransaction: tx
-      };
+      });
     } catch (txError) {
       console.error('Error processing transaction:', txError);
-      // Return a minimal transaction to avoid breaking the UI
-      return {
-        hash: tx.digest || 'error-processing',
-        timestamp: tx.timestampMs ? Number(tx.timestampMs) : null,
-        status: TransactionStatus.FAILED,
-        from: 'Error',
-        to: 'Error',
-        gasFee: '0',
-        type: TransactionType.NONE,
-        balanceChanges: [],
-        rawTransaction: tx
-      };
     }
+  }
+  
+  // Sort by timestamp (newest first)
+  processedTxs.sort((a, b) => {
+    if (!a.timestamp) return 1;
+    if (!b.timestamp) return -1;
+    return b.timestamp - a.timestamp;
   });
+  
+  return processedTxs;
 };
 
-// Enhanced function to get transaction history
-export const getTransactions = async (
+// Get transaction history with processing
+export const getProcessedTransactionHistory = async (
   address: string,
   network: 'mainnet' | 'testnet' | 'devnet' = 'mainnet',
   limit = 50
 ): Promise<ProcessedTransaction[]> => {
   try {
-    console.log(`Getting transactions for ${address} (limit: ${limit})`);
-    
-    // Get all transactions for the address
     const transactions = await getAllTransactionsForAddress(address, network, limit);
-    
-    // Process transactions into standardized format
-    const processedTransactions = processTransactions(transactions, address);
-    
-    // Log the first transaction for debugging
-    if (processedTransactions.length > 0) {
-      console.log('Sample processed transaction:', processedTransactions[0]);
-    }
-    
-    return processedTransactions;
+    return processTransactions(transactions, address);
   } catch (error) {
-    console.error('Error in getTransactions:', error);
-    return [];
+    console.error('Error getting processed transaction history:', error);
+    throw error;
   }
 };
 
-/**
- * Build portfolio history based on detailed transaction data
- * Uses the improved transaction processing to calculate accurate balance changes over time
- * 
- * @param address The SUI address to build history for
- * @param currentBalance The current balance in SUI
- * @param network The network to query
- * @param timeframe The timeframe to cover in the history
- * @returns Array of portfolio history points with timestamp and value
- */
+// Build detailed portfolio history from transactions
 export const buildDetailedPortfolioHistory = async (
   address: string,
   currentBalance: number,
   network: 'mainnet' | 'testnet' | 'devnet' = 'mainnet',
   timeframe: 'day' | 'week' | 'month' | 'year' = 'month'
-) => {
+): Promise<{timestamp: number, value: number}[]> => {
+  console.log(`Building detailed portfolio history for address: ${address}, balance: ${currentBalance}, timeframe: ${timeframe}`);
+  
+  // Verify inputs
+  if (!address) {
+    console.error('Address is required to build portfolio history');
+    throw new Error('Address is required to build portfolio history');
+  }
+  
+  if (currentBalance <= 0) {
+    console.error('Current balance must be positive to build portfolio history');
+    throw new Error('Current balance must be positive to build portfolio history');
+  }
+  
   try {
-    console.log(`Building detailed portfolio history from transactions for ${address}, timeframe: ${timeframe}`);
+    // Get all transactions
+    console.log('Fetching transaction history...');
     
-    // Get current price
-    const currentPrice = await getCurrentPrice('SUI');
-    console.log(`Current SUI price: $${currentPrice.price}`);
+    // Use the correctly renamed function
+    const transactions = await getProcessedTransactionHistory(address, network, 500);
     
-    // Determine how many transactions to fetch based on timeframe
-    let maxTransactions = 100;
+    console.log(`Retrieved ${transactions.length} transactions for portfolio history calculation`);
     
-    switch (timeframe) {
-      case 'day':
-        maxTransactions = 100;
-        break;
-      case 'week':
-        maxTransactions = 200;
-        break;
-      case 'month':
-        maxTransactions = 300;
-        break;
-      case 'year':
-        maxTransactions = 500;
-        break;
+    if (transactions.length === 0) {
+      console.warn('No transactions found, cannot build detailed portfolio history');
+      throw new Error('No transactions found for this address');
     }
     
-    // Get detailed transaction history
-    const detailedTxs = await getTransactions(address, network, maxTransactions);
-    
-    if (!detailedTxs || detailedTxs.length === 0) {
-      console.log('No transaction history available, returning simple portfolio history');
-      
-      // If no transaction history, return a simple history based on timeframe
-      const now = Date.now();
-      const historyPoints = [];
-      
-      switch (timeframe) {
-        case 'day':
-          for (let i = 24; i >= 0; i--) {
-            const timestamp = now - i * 60 * 60 * 1000;
-            historyPoints.push({
-              timestamp,
-              value: currentBalance * currentPrice.price * (0.95 + 0.05 * (24 - i) / 24)
-            });
-          }
-          break;
-        case 'week':
-          for (let i = 7; i >= 0; i--) {
-            const timestamp = now - i * 24 * 60 * 60 * 1000;
-            historyPoints.push({
-              timestamp,
-              value: currentBalance * currentPrice.price * (0.92 + 0.08 * (7 - i) / 7)
-            });
-          }
-          break;
-        case 'month':
-          for (let i = 30; i >= 0; i--) {
-            const timestamp = now - i * 24 * 60 * 60 * 1000;
-            historyPoints.push({
-              timestamp,
-              value: currentBalance * currentPrice.price * (0.85 + 0.15 * (30 - i) / 30)
-            });
-          }
-          break;
-        case 'year':
-          for (let i = 12; i >= 0; i--) {
-            const timestamp = now - i * 30 * 24 * 60 * 60 * 1000;
-            historyPoints.push({
-              timestamp,
-              value: currentBalance * currentPrice.price * (0.7 + 0.3 * (12 - i) / 12)
-            });
-          }
-          break;
-      }
-      
-      return historyPoints;
+    // Get current SUI price
+    let currentPriceData;
+    try {
+      currentPriceData = await getCurrentPrice();
+      console.log(`Current SUI price: $${currentPriceData.price}`);
+    } catch (priceError) {
+      console.error('Error fetching current price:', priceError);
+      throw new Error('Unable to fetch current SUI price');
     }
     
-    console.log(`Found ${detailedTxs.length} transactions for building portfolio history`);
+    const currentPrice = currentPriceData.price;
     
-    // Filter transactions based on the selected timeframe
-    const now = Date.now();
-    let oldestTimestamp = now;
-    
-    switch (timeframe) {
-      case 'day':
-        oldestTimestamp = now - 24 * 60 * 60 * 1000; // 1 day ago
-        break;
-      case 'week':
-        oldestTimestamp = now - 7 * 24 * 60 * 60 * 1000; // 1 week ago
-        break;
-      case 'month':
-        oldestTimestamp = now - 30 * 24 * 60 * 60 * 1000; // 30 days ago
-        break;
-      case 'year':
-        oldestTimestamp = now - 365 * 24 * 60 * 60 * 1000; // 1 year ago
-        break;
-    }
-    
-    // Filter to relevant transactions within the timeframe
-    const relevantTxs = detailedTxs.filter(tx => tx.timestamp && tx.timestamp >= oldestTimestamp);
-    console.log(`Filtered to ${relevantTxs.length} transactions within selected timeframe (${timeframe})`);
-    
-    // Start from the current balance and work backwards
-    let runningBalance = currentBalance;
-    const currentValue = currentBalance * currentPrice.price;
-    
-    // Initialize portfolio history with current point
-    const portfolioHistory = [{
-      timestamp: now,
-      value: currentValue
-    }];
-    
-    // Limit the number of API calls for historical prices with a cache
-    const priceCache: Record<string, number> = {};
-    
-    // Process transactions from newest to oldest
-    // First, sort by timestamp (newest first)
-    relevantTxs.sort((a, b) => {
+    // Sort transactions by timestamp (oldest first)
+    const sortedTransactions = [...transactions].sort((a, b) => {
       if (!a.timestamp) return 1;
       if (!b.timestamp) return -1;
-      return b.timestamp - a.timestamp;
+      return a.timestamp - b.timestamp;
     });
     
-    for (const tx of relevantTxs) {
-      if (!tx.timestamp) continue;
-      
-      // Calculate net balance change from this transaction for the address
-      let netBalanceChange = 0;
-      
-      tx.balanceChanges.forEach(change => {
-        if (change.owner === address && change.coinType === '0x2::sui::SUI') {
-          netBalanceChange += change.amount;
+    // Filter out transactions without timestamps
+    const validTransactions = sortedTransactions.filter(tx => tx.timestamp !== null);
+    
+    console.log(`Found ${validTransactions.length} transactions with valid timestamps`);
+    
+    if (validTransactions.length === 0) {
+      throw new Error('No transactions with valid timestamps found');
+    }
+    
+    // Handle timeframe: limit how far back we go
+    const now = Date.now();
+    let timeframeCutoff: number;
+    
+    switch (timeframe) {
+      case 'day':
+        timeframeCutoff = now - 24 * 60 * 60 * 1000; // 1 day
+        break;
+      case 'week':
+        timeframeCutoff = now - 7 * 24 * 60 * 60 * 1000; // 7 days
+        break;
+      case 'month': 
+        timeframeCutoff = now - 30 * 24 * 60 * 60 * 1000; // 30 days
+        break;
+      case 'year':
+        timeframeCutoff = now - 365 * 24 * 60 * 60 * 1000; // 1 year
+        break;
+      default:
+        timeframeCutoff = now - 30 * 24 * 60 * 60 * 1000; // Default: 30 days
+    }
+    
+    // Create portfolio data points
+    const portfolioHistory: {timestamp: number, value: number}[] = [];
+    
+    // Get transactions within timeframe
+    const timeframeTransactions = validTransactions.filter(tx => 
+      tx.timestamp !== null && tx.timestamp >= timeframeCutoff
+    );
+    
+    console.log(`Found ${timeframeTransactions.length} transactions within selected timeframe`);
+    
+    // Find the most recent transaction before the timeframe cutoff
+    const mostRecentTransactionBeforeTimeframe = validTransactions
+      .filter(tx => tx.timestamp !== null && tx.timestamp < timeframeCutoff)
+      .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))[0];
+    
+    console.log('Most recent transaction before timeframe:', 
+      mostRecentTransactionBeforeTimeframe 
+        ? new Date(mostRecentTransactionBeforeTimeframe.timestamp!).toISOString() 
+        : 'None');
+    
+    // Calculate the SUI balance right before the timeframe started
+    let balanceBeforeTimeframe = 0;
+    
+    if (mostRecentTransactionBeforeTimeframe) {
+      // If we have at least one transaction before the cutoff, 
+      // calculate the cumulative balance up to that point
+      let runningBalance = 0;
+      for (const tx of validTransactions) {
+        if (!tx.timestamp) continue;
+        
+        // Stop once we reach the timeframe cutoff
+        if (tx.timestamp >= timeframeCutoff) break;
+        
+        // Calculate balance change from this transaction
+        let balanceChange = 0;
+        for (const change of tx.balanceChanges) {
+          if (change.owner === address) {
+            balanceChange += change.amount;
+          }
         }
-      });
-      
-      // Skip transactions with no SUI balance change
-      if (netBalanceChange === 0) continue;
-      
-      // Adjust running balance by removing this transaction's effect
-      // Since we're going backward in time, we subtract the change
-      runningBalance -= netBalanceChange;
-      
-      // Skip if we hit negative balance (shouldn't happen with real data)
-      if (runningBalance < 0) {
-        console.log(`Skipping transaction that would result in negative balance: ${tx.hash}`);
-        runningBalance += netBalanceChange;
-        continue;
+        
+        // Add the change to the running balance
+        runningBalance += balanceChange;
       }
       
-      // Get price at transaction time
-      const txDate = new Date(tx.timestamp);
-      const cacheKey = `${txDate.toISOString().split('T')[0]}`;
+      balanceBeforeTimeframe = runningBalance;
+      console.log(`Calculated SUI balance before timeframe: ${balanceBeforeTimeframe}`);
       
+      // Get historical price for this timestamp if possible
       let historicalPrice;
-      if (priceCache[cacheKey]) {
-        historicalPrice = priceCache[cacheKey];
-        console.log(`Using cached price for ${txDate.toLocaleString()}: $${historicalPrice}`);
-      } else {
-        historicalPrice = await getHistoricalPriceForDate('SUI', tx.timestamp);
-        priceCache[cacheKey] = historicalPrice;
-        console.log(`Fetched price for ${txDate.toLocaleString()}: $${historicalPrice}`);
+      try {
+        historicalPrice = await getHistoricalPriceForDate('SUI', mostRecentTransactionBeforeTimeframe.timestamp!);
+        if (!historicalPrice) historicalPrice = currentPrice;
+      } catch (error) {
+        historicalPrice = currentPrice;
       }
       
-      const portfolioValue = runningBalance * historicalPrice;
-      
-      console.log(`After transaction ${tx.hash.substring(0, 8)}... on ${txDate.toLocaleString()}:`);
-      console.log(`  Transaction type: ${tx.type}`);
-      console.log(`  Balance change: ${netBalanceChange.toFixed(4)} SUI`);
-      console.log(`  New balance: ${runningBalance.toFixed(4)} SUI`);
-      console.log(`  SUI Price: $${historicalPrice}`);
-      console.log(`  Portfolio Value: $${portfolioValue.toFixed(2)}`);
-      
+      // Add a data point for the start of the timeframe
       portfolioHistory.push({
-        timestamp: tx.timestamp,
-        value: portfolioValue
+        timestamp: timeframeCutoff,
+        value: balanceBeforeTimeframe * historicalPrice
+      });
+    } else {
+      // If no transaction before timeframe, start with zero balance
+      portfolioHistory.push({
+        timestamp: timeframeCutoff,
+        value: 0
       });
     }
     
-    // Sort by timestamp (oldest first) for chart display
+    // If there are no transactions in the timeframe, but we have a current balance,
+    // we'll just create a flat line from the start of timeframe to now
+    if (timeframeTransactions.length === 0) {
+      console.log(`No transactions in ${timeframe} timeframe, adding current balance as flat line`);
+      // Add current point
+      portfolioHistory.push({
+        timestamp: now,
+        value: currentBalance * currentPrice
+      });
+    } else {
+      // Start with a clean slate or the balance from before the timeframe
+      let runningSuiBalance = balanceBeforeTimeframe;
+      
+      // Fetch historical prices for key timestamps
+      console.log('Fetching historical prices for transactions...');
+      
+      // Cache for historical prices to avoid redundant API calls
+      const priceCache: Record<string, number> = {};
+      
+      // For each transaction in the timeframe, calculate the balance at that point in time
+      for (const tx of timeframeTransactions) {
+        if (!tx.timestamp) continue;
+        
+        // Calculate balance change from this transaction
+        let balanceChange = 0;
+        for (const change of tx.balanceChanges) {
+          if (change.owner === address) {
+            balanceChange += change.amount;
+          }
+        }
+        
+        // Add the change to the running balance
+        runningSuiBalance += balanceChange;
+        
+        // Format date for cache key (YYYY-MM-DD)
+        const dateString = new Date(tx.timestamp).toISOString().split('T')[0];
+        
+        // Fetch historical price if not in cache
+        let historicalPrice;
+        try {
+          if (priceCache[dateString]) {
+            historicalPrice = priceCache[dateString];
+          } else {
+            // Get historical price for this timestamp
+            historicalPrice = await getHistoricalPriceForDate('SUI', tx.timestamp);
+            
+            if (typeof historicalPrice === 'number' && !isNaN(historicalPrice)) {
+              // Store in cache for reuse
+              priceCache[dateString] = historicalPrice;
+            } else {
+              // Fallback to current price if historical price not available
+              historicalPrice = currentPrice;
+            }
+          }
+          
+          console.log(`Price at ${new Date(tx.timestamp).toLocaleDateString()}: $${historicalPrice}`);
+        } catch (error) {
+          console.warn(`Could not get historical price for ${new Date(tx.timestamp).toLocaleDateString()}, using current price`);
+          historicalPrice = currentPrice;
+        }
+        
+        // Calculate USD value
+        const usdValue = runningSuiBalance * (typeof historicalPrice === 'number' ? historicalPrice : 1.0);
+        
+        // Add portfolio value point in USD
+        portfolioHistory.push({
+          timestamp: tx.timestamp,
+          value: usdValue
+        });
+      }
+      
+      // Add the current point with current price
+      portfolioHistory.push({
+        timestamp: now,
+        value: currentBalance * currentPrice
+      });
+    }
+    
+    // Sort by timestamp (oldest to newest)
     portfolioHistory.sort((a, b) => a.timestamp - b.timestamp);
     
-    // If we don't have enough points or transactions don't go back far enough, add estimated points
-    if (portfolioHistory.length < 3 || 
-        (portfolioHistory[0].timestamp > oldestTimestamp && timeframe !== 'day')) {
-      console.log('Adding additional points for better visualization');
-      
-      const enhancedHistory = [...portfolioHistory];
-      
-      // Determine how many additional points to add based on timeframe
-      let interval = 24 * 60 * 60 * 1000; // Default: 1 day interval
-      
-      switch (timeframe) {
-        case 'day':
-          interval = 2 * 60 * 60 * 1000; // 2 hours
-          break;
-        case 'week':
-          interval = 24 * 60 * 60 * 1000; // 1 day
-          break;
-        case 'month':
-          interval = 2 * 24 * 60 * 60 * 1000; // 2 days
-          break;
-        case 'year':
-          interval = 14 * 24 * 60 * 60 * 1000; // 2 weeks
-          break;
-      }
-      
-      // If we have at least one historical point, use that as reference
-      if (portfolioHistory.length > 1) {
-        const oldestPoint = portfolioHistory[0];
-        const newestPoint = portfolioHistory[portfolioHistory.length - 1];
-        
-        // Only add points before our oldest transaction
-        for (let timestamp = oldestPoint.timestamp - interval; 
-             timestamp >= oldestTimestamp; 
-             timestamp -= interval) {
-          
-          // Get price at this timestamp
-          let historicalPrice;
-          const pointDate = new Date(timestamp);
-          const cacheKey = `${pointDate.toISOString().split('T')[0]}`;
-          
-          if (priceCache[cacheKey]) {
-            historicalPrice = priceCache[cacheKey];
-          } else {
-            historicalPrice = await getHistoricalPriceForDate('SUI', timestamp);
-            priceCache[cacheKey] = historicalPrice;
-          }
-          
-          // Calculate estimated value
-          // The further back in time, the more we reduce from the oldest known balance
-          const timeDiffRatio = (oldestPoint.timestamp - timestamp) / 
-                               (newestPoint.timestamp - oldestPoint.timestamp);
-          
-          // We need to estimate what the balance was, by dividing the value by the price
-          const oldestPointDate = new Date(oldestPoint.timestamp);
-          const oldestPointCacheKey = `${oldestPointDate.toISOString().split('T')[0]}`;
-          const oldestPointPrice = priceCache[oldestPointCacheKey] || historicalPrice;
-          
-          const oldestBalance = oldestPoint.value / oldestPointPrice;
-          const extrapolatedBalance = Math.max(0, oldestBalance * (1 - 0.1 * timeDiffRatio));
-          const estimatedValue = extrapolatedBalance * historicalPrice;
-          
-          enhancedHistory.push({
-            timestamp,
-            value: estimatedValue
-          });
-        }
-      } else {
-        // If we have no historical points, just create a simulated history
-        const additionalPoints = timeframe === 'day' ? 12 : 
-                                 timeframe === 'week' ? 7 : 
-                                 timeframe === 'month' ? 15 : 26;
-                                 
-        for (let i = 0; i < additionalPoints; i++) {
-          const timestamp = oldestTimestamp + (i * (now - oldestTimestamp) / additionalPoints);
-          
-          // Get price at this timestamp
-          let historicalPrice;
-          const pointDate = new Date(timestamp);
-          const cacheKey = `${pointDate.toISOString().split('T')[0]}`;
-          
-          if (priceCache[cacheKey]) {
-            historicalPrice = priceCache[cacheKey];
-          } else {
-            historicalPrice = await getHistoricalPriceForDate('SUI', timestamp);
-            priceCache[cacheKey] = historicalPrice;
-          }
-          
-          // Simple simulation - assume balance was 80-95% of current value
-          const simRatio = 0.8 + (0.15 * i / additionalPoints);
-          const estimatedValue = currentValue * simRatio;
-          
-          enhancedHistory.push({
-            timestamp,
-            value: estimatedValue
-          });
-        }
-      }
-      
-      // Sort again
-      enhancedHistory.sort((a, b) => a.timestamp - b.timestamp);
-      
-      // Replace the portfolio history with enhanced version
-      portfolioHistory.length = 0;
-      portfolioHistory.push(...enhancedHistory);
-    }
-    
-    console.log(`Final portfolio history has ${portfolioHistory.length} points for timeframe ${timeframe}`);
-    
-    // Show sample points for debugging
-    if (portfolioHistory.length > 0) {
-      if (portfolioHistory.length > 5) {
-        console.log('First points:', portfolioHistory.slice(0, 2));
-        console.log('Last points:', portfolioHistory.slice(-2));
-      } else {
-        console.log('All points:', portfolioHistory);
-      }
-    }
+    console.log(`Built portfolio history with ${portfolioHistory.length} data points`);
+    console.log('Sample data:', portfolioHistory.slice(0, 3), '...', 
+                portfolioHistory.slice(-3));
     
     return portfolioHistory;
   } catch (error) {
     console.error('Error building detailed portfolio history:', error);
-    
-    // Fallback to simple history based on timeframe
-    const now = Date.now();
-    const historyPoints = [];
-    
-    switch (timeframe) {
-      case 'day':
-        for (let i = 24; i >= 0; i--) {
-          const timestamp = now - i * 60 * 60 * 1000;
-          historyPoints.push({
-            timestamp,
-            value: currentBalance * 0.5 * (0.95 + 0.05 * (24 - i) / 24)
-          });
-        }
-        break;
-      case 'week':
-        for (let i = 7; i >= 0; i--) {
-          const timestamp = now - i * 24 * 60 * 60 * 1000;
-          historyPoints.push({
-            timestamp,
-            value: currentBalance * 0.5 * (0.92 + 0.08 * (7 - i) / 7)
-          });
-        }
-        break;
-      case 'month':
-        for (let i = 30; i >= 0; i--) {
-          const timestamp = now - i * 24 * 60 * 60 * 1000;
-          historyPoints.push({
-            timestamp,
-            value: currentBalance * 0.5 * (0.85 + 0.15 * (30 - i) / 30)
-          });
-        }
-        break;
-      case 'year':
-        for (let i = 12; i >= 0; i--) {
-          const timestamp = now - i * 30 * 24 * 60 * 60 * 1000;
-          historyPoints.push({
-            timestamp,
-            value: currentBalance * 0.5 * (0.7 + 0.3 * (12 - i) / 12)
-          });
-        }
-        break;
-    }
-    
-    return historyPoints;
+    throw error;
   }
 }; 

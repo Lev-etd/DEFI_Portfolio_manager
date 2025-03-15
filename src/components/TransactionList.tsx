@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { 
-  getTransactions,
+  getProcessedTransactionHistory,
   ProcessedTransaction, 
   TransactionType, 
   TransactionStatus,
@@ -33,10 +33,19 @@ export default function TransactionList({ address, limit = 10 }: TransactionList
     try {
       setLoading(true);
       setError(null);
+      
+      // Make sure we have a valid address before proceeding
+      if (!address || address === 'null' || address === 'undefined') {
+        console.log('Invalid address:', address);
+        setTransactions([]);
+        setLoading(false);
+        return;
+      }
+      
       console.log(`Fetching transactions for address: ${address}`);
       
-      // Use the new getTransactions function
-      const txHistory = await getTransactions(address || '', 'mainnet', limit);
+      // Use the renamed function - make sure we're passing a string
+      const txHistory = await getProcessedTransactionHistory(String(address), 'mainnet', limit);
       console.log(`Fetched ${txHistory.length} transactions for ${address}`);
       
       if (txHistory.length > 0) {
@@ -45,6 +54,7 @@ export default function TransactionList({ address, limit = 10 }: TransactionList
         // If no transactions found, show sample data in development
         console.log('No transactions found, using sample data for UI testing in development');
         if (process.env.NODE_ENV !== 'production') {
+          setShowSampleData(true);
           setTransactions(getSampleTransactions());
         } else {
           setTransactions([]);
@@ -56,6 +66,7 @@ export default function TransactionList({ address, limit = 10 }: TransactionList
       
       // In development, show sample transactions for UI testing
       if (process.env.NODE_ENV !== 'production') {
+        setShowSampleData(true);
         setTransactions(getSampleTransactions());
       }
     } finally {

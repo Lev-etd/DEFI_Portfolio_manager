@@ -1,19 +1,63 @@
 'use client';
 
-import React from 'react';
-import { useWallet } from '../lib/wallet-context';
-import { formatSuiBalance } from '../lib/sui-client';
-import PriceInfo from '../components/PriceInfo';
+import React, { useState, useEffect } from 'react';
+import { useCurrentAccount, useSuiClient } from '@mysten/dapp-kit';
+import { SUI_TYPE_ARG, MIST_PER_SUI } from '@mysten/sui/utils';
 import PortfolioChart from '../components/PortfolioChart';
 import TransactionList from '../components/TransactionList';
+import { getCurrentSuiPrice } from '../lib/navi-client';
 
 export default function Home() {
-  const { address, isConnected, balance, assets, transactions, loading, error } = useWallet();
+  // Use dApp Kit hooks
+  const currentAccount = useCurrentAccount();
+  const suiClient = useSuiClient();
   
-  // Add debugging for balance
-  console.log('Raw balance from wallet:', balance);
-  console.log('Balance type:', typeof balance);
-  console.log('Formatted balance:', formatSuiBalance(balance));
+  const isConnected = !!currentAccount;
+  const address = currentAccount?.address || null;
+  
+  const [suiBalance, setSuiBalance] = useState<number>(0);
+  const [usdBalance, setUsdBalance] = useState<number | null>(null);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
+
+  // Get SUI balance
+  useEffect(() => {
+    const fetchBalance = async () => {
+      if (!currentAccount) {
+        setLoading(false);
+        return;
+      }
+      
+      setLoading(true);
+      
+      try {
+        // Get balance from SUI network
+        const balanceResponse = await suiClient.getBalance({
+          owner: currentAccount.address,
+          coinType: SUI_TYPE_ARG,
+        });
+        
+        // Convert balance from MIST to SUI
+        const balanceInSui = Number(balanceResponse.totalBalance) / Number(MIST_PER_SUI);
+        setSuiBalance(balanceInSui);
+        
+        // Get USD value
+        try {
+          const price = await getCurrentSuiPrice();
+          setUsdBalance(balanceInSui * price);
+        } catch (error) {
+          console.error('Error fetching USD value:', error);
+        }
+      } catch (error) {
+        console.error('Error fetching balance:', error);
+        setError('Failed to fetch balance');
+      } finally {
+        setLoading(false);
+      }
+    };
+    
+    fetchBalance();
+  }, [currentAccount, suiClient]);
 
   if (loading) {
     return (
@@ -30,21 +74,6 @@ export default function Home() {
       <div className="flex flex-col items-center justify-center min-h-screen py-2">
         <main className="flex flex-col items-center justify-center flex-1 px-4 sm:px-20 text-center">
           <h2 className="text-2xl mb-4 text-red-500">Error: {error}</h2>
-        </main>
-      </div>
-    );
-  }
-
-  if (!isConnected) {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-screen py-2">
-        <main className="flex flex-col items-center justify-center flex-1 px-4 sm:px-20 text-center">
-          <h1 className="text-4xl font-bold mb-6">Sui Portfolio Manager</h1>
-          <p className="text-xl mb-8">Track and manage your Sui blockchain assets</p>
-          
-          <div className="p-6 max-w-sm bg-white rounded-xl shadow-md flex flex-col space-y-4">
-            <p>Use the connect button in the navigation bar to connect your wallet</p>
-          </div>
         </main>
       </div>
     );
@@ -71,33 +100,34 @@ export default function Home() {
                 </div>
                 <div className="mt-4 sm:mt-0">
                   <p className="text-gray-500 mb-1">Balance</p>
-                  <p className="text-2xl font-bold">{formatSuiBalance(balance)} SUI</p>
+                  <p className="text-2xl font-bold">{suiBalance.toFixed(2)} SUI</p>
+                  {usdBalance !== null && (
+                    <p className="text-gray-500 text-sm">
+                      ≈${usdBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </p>
+                  )}
                 </div>
               </div>
             </div>
           )}
         </div>
         
-        {isConnected && (
+        {isConnected && address && (
           <div className="space-y-6">
             {/* Portfolio Chart Section */}
             <div className="my-8">
-              <PortfolioChart balance={balance} address={address} />
+              <PortfolioChart balance={suiBalance} address={address} />
             </div>
             
-            {/* Transaction List Section */}
-            <div className="my-8">
-              <TransactionList address={address} limit={20} />
-            </div>
-            
-            {/* Other Assets Section (placeholder for future expansion) */}
+            {/* Other Assets Section */}
             <div className="bg-white p-6 rounded-xl shadow-md">
               <h2 className="text-xl font-semibold mb-4">Other Assets</h2>
               <p className="text-gray-500">This section will display your other assets in the future.</p>
             </div>
             
-            {/* Recent Transactions Section (placeholder for future expansion) */}
+            {/* Recent Transactions Section */}
             <div className="bg-white p-6 rounded-xl shadow-md">
+              <h2 className="text-xl font-semibold mb-4">Recent Transactions</h2>
               <TransactionList address={address} limit={10} />
             </div>
           </div>
